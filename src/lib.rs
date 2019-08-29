@@ -31,10 +31,10 @@
 
 extern crate fnv;
 
+extern crate crossbeam_utils;
 #[cfg(feature = "heapsize")]
 extern crate heapsize;
 extern crate rayon;
-extern crate crossbeam_utils;
 extern crate wyhash;
 
 #[macro_use]
@@ -48,16 +48,17 @@ extern crate serde;
 use heapsize::HeapSizeOf;
 use rayon::prelude::*;
 
-pub mod hashmap;
 mod bitvector;
+pub mod hashmap;
 use bitvector::*;
 
+use std::convert::TryInto;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering, AtomicBool};
 
 #[inline]
 fn fold(v: u64) -> u32 {
@@ -73,16 +74,15 @@ fn hash_with_seed_slow<T: Hash>(iter: u64, v: &T) -> u64 {
 
 #[inline]
 fn hash_with_seed<T: Hash>(iter: u64, v: &T) -> u64 {
-  let mut state = wyhash::WyHash::with_seed(1<<iter + iter);
-  v.hash(&mut state);
-  state.finish()
+    let mut state = wyhash::WyHash::with_seed(1 << iter + iter);
+    v.hash(&mut state);
+    state.finish()
 }
 
 #[inline]
 fn hash_with_seed32<T: Hash>(iter: u64, v: &T) -> u32 {
     fold(hash_with_seed(iter, v))
 }
-
 
 #[inline]
 fn fastmod(hash: u32, n: u32) -> u64 {
@@ -91,9 +91,9 @@ fn fastmod(hash: u32, n: u32) -> u64 {
 
 #[inline]
 fn hashmod<T: Hash>(iter: u64, v: &T, n: usize) -> u64 {
-    // when n < 2^32, use the fast alternative to modulo described here: 
+    // when n < 2^32, use the fast alternative to modulo described here:
     // https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
-    if n < 1<<32 { 
+    if n < u32::max_value().try_into().unwrap() {
         let h = hash_with_seed32(iter, v);
         fastmod(h, n as u32) as u64
     } else {
@@ -121,8 +121,6 @@ impl<T> HeapSizeOf for Mphf<T> {
 const MAX_ITERS: u64 = 100;
 
 impl<'a, T: 'a + Hash + Clone + Debug> Mphf<T> {
-
-
     /// Constructs an MPHF from a (possibly lazy) iterator over iterators.
     /// This allows construction of very large MPHFs without holding all the keys
     /// in memory simultaneously.
@@ -131,14 +129,16 @@ impl<'a, T: 'a + Hash + Clone + Debug> Mphf<T> {
     /// `gamma` controls the tradeoff between the construction-time and run-time speed,
     /// and the size of the datastructure representing the hash function. See the paper for details.
     /// `max_iters` - None to never stop trying to find a perfect hash (safe if no duplicates).
-    /// NOTE: the inner iterator `N::IntoIter` should override `nth` if there's an efficient way to skip 
+    /// NOTE: the inner iterator `N::IntoIter` should override `nth` if there's an efficient way to skip
     /// over items when iterating.  This is important because later iterations of the MPHF construction algorithm
     /// skip most of the items.
     pub fn from_chunked_iterator<I, N>(gamma: f64, objects: &'a I, n: usize) -> Mphf<T>
     where
-        &'a I: IntoIterator<Item = N>, N: IntoIterator<Item = T> + Send,
+        &'a I: IntoIterator<Item = N>,
+        N: IntoIterator<Item = T> + Send,
         <N as IntoIterator>::IntoIter: ExactSizeIterator,
-        <&'a I as IntoIterator>::IntoIter: Send, I: Sync
+        <&'a I as IntoIterator>::IntoIter: Send,
+        I: Sync,
     {
         let mut iter = 0;
         let mut bitvecs = Vec::new();
@@ -191,10 +191,10 @@ impl<'a, T: 'a + Hash + Clone + Debug> Mphf<T> {
                             collide.insert_sync(idx as usize);
                         }
                     }
-                }// end-window for
+                } // end-window for
 
                 offset += len;
-            }// end-objects for
+            } // end-objects for
 
             let mut offset = 0;
             for object in objects {
@@ -325,7 +325,6 @@ impl<T: Hash + Clone + Debug> Mphf<T> {
         r
     }
 
-    
     fn log_heap_size(&self, _items: usize) {
         #[cfg(feature = "heapsize")]
         {
@@ -418,8 +417,7 @@ impl<T: Hash + Clone + Debug> Mphf<T> {
 impl<T: Hash + Clone + Debug + Sync + Send> Mphf<T> {
     /// Same as `new`, but parallelizes work on the rayon default Rayon threadpool.
     /// Configure the number of threads on that threadpool to control CPU usage.
-    pub fn new_parallel(gamma: f64, objects: &Vec<T>,
-                        starting_seed: Option<u64>) -> Mphf<T> {
+    pub fn new_parallel(gamma: f64, objects: &Vec<T>, starting_seed: Option<u64>) -> Mphf<T> {
         let n = objects.len();
         let mut bitvecs = Vec::new();
         let mut iter = 0;
@@ -505,7 +503,7 @@ impl<T: Hash + Clone + Debug + Sync + Send> Mphf<T> {
 struct Queue<'a, I: 'a, T>
 where
     &'a I: IntoIterator,
-    <&'a I as IntoIterator>::Item: IntoIterator<Item = T>
+    <&'a I as IntoIterator>::Item: IntoIterator<Item = T>,
 {
     keys_object: &'a I,
     queue: <&'a I as IntoIterator>::IntoIter,
@@ -520,13 +518,12 @@ where
 
 impl<'a, I: 'a, N1, N2, T> Queue<'a, I, T>
 where
-    &'a I: IntoIterator<Item=N1>,
+    &'a I: IntoIterator<Item = N1>,
     N2: Iterator<Item = T> + ExactSizeIterator,
-    N1: IntoIterator<Item = T, IntoIter = N2> + Clone {
-
-    fn new(object: &'a I, num_keys: usize) -> Queue<'a, I, T>
-    {
-        Queue{
+    N1: IntoIterator<Item = T, IntoIter = N2> + Clone,
+{
+    fn new(object: &'a I, num_keys: usize) -> Queue<'a, I, T> {
+        Queue {
             keys_object: object,
             queue: object.into_iter(),
 
@@ -561,33 +558,31 @@ where
 
         let node = self.queue.next().unwrap();
         let node_keys_start = self.last_key_index;
-        
+
         let num_keys = node.clone().into_iter().len();
 
         self.last_key_index += num_keys;
 
-        return Some((node.into_iter(), self.job_id,
-                      node_keys_start,
-                      num_keys)
-        );
+        return Some((node.into_iter(), self.job_id, node_keys_start, num_keys));
     }
 }
 
 impl<'a, T: 'a + Hash + Clone + Debug + Send + Sync> Mphf<T> {
-
-
     /// Same as to `from_chunked_iterator` but parallelizes work over `num_threads` threads.
-    pub fn from_chunked_iterator_parallel<I, N>(gamma: f64, objects: &'a I,
-                                        max_iters: Option<u64>,
-                                        n: usize, num_threads: usize)
-                                        -> Mphf<T>
+    pub fn from_chunked_iterator_parallel<I, N>(
+        gamma: f64,
+        objects: &'a I,
+        max_iters: Option<u64>,
+        n: usize,
+        num_threads: usize,
+    ) -> Mphf<T>
     where
-        &'a I: IntoIterator<Item = N>, 
+        &'a I: IntoIterator<Item = N>,
         N: IntoIterator<Item = T> + Send + Clone,
         <N as IntoIterator>::IntoIter: ExactSizeIterator,
-        <&'a I as IntoIterator>::IntoIter: Send, I: Sync
+        <&'a I as IntoIterator>::IntoIter: Send,
+        I: Sync,
     {
-
         // TODO CONSTANT, might have to change
         // Allowing atmost 381Mb for buffer
         const MAX_BUFFER_SIZE: usize = 50000000;
@@ -600,38 +595,39 @@ impl<'a, T: 'a + Hash + Clone + Debug + Send + Sync> Mphf<T> {
 
         assert!(gamma > 1.01);
 
-        let find_collisions = | seed: &u64, key: &T, size: &u64,
-                                collide: &Arc<BitVector>,
-                                a: &Arc<BitVector> | {
-            let idx = hashmod(*seed, key, *size as usize);
+        let find_collisions =
+            |seed: &u64, key: &T, size: &u64, collide: &Arc<BitVector>, a: &Arc<BitVector>| {
+                let idx = hashmod(*seed, key, *size as usize);
 
-            if ! collide.contains(idx as usize) {
-                let a_was_set = !a.insert(idx as usize);
-                if a_was_set {
-                    collide.insert(idx as usize);
+                if !collide.contains(idx as usize) {
+                    let a_was_set = !a.insert(idx as usize);
+                    if a_was_set {
+                        collide.insert(idx as usize);
+                    }
                 }
-            }
-        };
+            };
 
-        let remove_collisions = | seed: &u64, key: &T, size: &u64,
-                                  keys_index: usize,
-                                  collide: &Arc<BitVector>,
-                                  a: &Arc<BitVector>,
-                                  done_keys: &BitVector,
-                                  buffer_keys: &Arc<AtomicBool>,
-                                  buffered_keys_vec: &Arc<Mutex<Vec<T>>> | {
-            let idx = hashmod(*seed, key, *size as usize);
+        let remove_collisions =
+            |seed: &u64,
+             key: &T,
+             size: &u64,
+             keys_index: usize,
+             collide: &Arc<BitVector>,
+             a: &Arc<BitVector>,
+             done_keys: &BitVector,
+             buffer_keys: &Arc<AtomicBool>,
+             buffered_keys_vec: &Arc<Mutex<Vec<T>>>| {
+                let idx = hashmod(*seed, key, *size as usize);
 
-            if collide.contains(idx as usize) {
-                a.remove(idx as usize);
-                if buffer_keys.load(Ordering::SeqCst) {
-                    buffered_keys_vec.lock().unwrap().push(key.clone());
+                if collide.contains(idx as usize) {
+                    a.remove(idx as usize);
+                    if buffer_keys.load(Ordering::SeqCst) {
+                        buffered_keys_vec.lock().unwrap().push(key.clone());
+                    }
+                } else {
+                    done_keys.insert(keys_index as usize);
                 }
-            }
-            else {
-                done_keys.insert(keys_index as usize);
-            }
-        };
+            };
 
         let buffered_keys_vec = Arc::new(Mutex::new(Vec::new()));
         let buffer_keys = Arc::new(AtomicBool::new(false));
@@ -642,10 +638,11 @@ impl<'a, T: 'a + Hash + Clone + Debug + Send + Sync> Mphf<T> {
             }
 
             let keys_remaining = if iter == 0 { n } else { n - done_keys.len() };
-            if keys_remaining == 0 { break; }
-            if keys_remaining < MAX_BUFFER_SIZE
-                && keys_remaining < min_buffer_keys_threshold {
-                    buffer_keys.store(true, Ordering::SeqCst);
+            if keys_remaining == 0 {
+                break;
+            }
+            if keys_remaining < MAX_BUFFER_SIZE && keys_remaining < min_buffer_keys_threshold {
+                buffer_keys.store(true, Ordering::SeqCst);
             }
 
             let size = std::cmp::max(255, (gamma * keys_remaining as f64) as u64);
@@ -656,8 +653,7 @@ impl<'a, T: 'a + Hash + Clone + Debug + Send + Sync> Mphf<T> {
             let done_keys_count = Arc::new(AtomicUsize::new(0));
 
             crossbeam_utils::thread::scope(|scope| {
-
-                for _ in 0 .. num_threads {
+                for _ in 0..num_threads {
                     let buffer_keys = buffer_keys.clone();
                     let buffered_keys_vec = buffered_keys_vec.clone();
                     let done_keys_count = done_keys_count.clone();
@@ -668,7 +664,6 @@ impl<'a, T: 'a + Hash + Clone + Debug + Send + Sync> Mphf<T> {
 
                     scope.spawn(move |_| {
                         loop {
-
                             let (node, job_id, offset, num_keys) =
                                 match work_queue.lock().unwrap().next(&done_keys_count) {
                                     None => break,
@@ -681,20 +676,23 @@ impl<'a, T: 'a + Hash + Clone + Debug + Send + Sync> Mphf<T> {
                             for index in 0..num_keys {
                                 let key_index = offset + index;
                                 if !done_keys.contains(key_index) {
-
                                     let key = into_node.nth(index - node_pos).unwrap();
                                     node_pos = index + 1;
 
                                     if job_id == 0 {
-                                        find_collisions(&iter, &key, &size,
-                                                        &collide, &a);
-                                    }
-                                    else {
-                                        remove_collisions(&iter, &key, &size,
-                                                          key_index,
-                                                          &collide, &a,
-                                                          &done_keys, &buffer_keys,
-                                                          &buffered_keys_vec);
+                                        find_collisions(&iter, &key, &size, &collide, &a);
+                                    } else {
+                                        remove_collisions(
+                                            &iter,
+                                            &key,
+                                            &size,
+                                            key_index,
+                                            &collide,
+                                            &a,
+                                            &done_keys,
+                                            &buffer_keys,
+                                            &buffered_keys_vec,
+                                        );
                                     }
                                 } //end-if
                             }
@@ -703,7 +701,8 @@ impl<'a, T: 'a + Hash + Clone + Debug + Send + Sync> Mphf<T> {
                         } //end-loop
                     }); //end-scope
                 } //end-threads-for
-            }).unwrap(); //end-crossbeam
+            })
+            .unwrap(); //end-crossbeam
 
             let unwrapped_a = Arc::try_unwrap(a).unwrap();
             bitvecs.push(unwrapped_a);
@@ -762,7 +761,6 @@ mod tests {
     where
         T: Hash + PartialEq + Eq + Clone + Debug,
     {
-
         // Generate the MPHF
         let phf = Mphf::new(1.7, &xsv);
 
@@ -802,8 +800,9 @@ mod tests {
         hashes == gt
     }
 
-    fn check_chunked_mphf<T>(values: Vec<Vec<T>>, total: usize) -> bool 
-    where T: Sync + Hash + PartialEq + Eq + Clone + Debug + Send 
+    fn check_chunked_mphf<T>(values: Vec<Vec<T>>, total: usize) -> bool
+    where
+        T: Sync + Hash + PartialEq + Eq + Clone + Debug + Send,
     {
         let phf = Mphf::from_chunked_iterator(1.7, &values, total);
 
@@ -821,9 +820,9 @@ mod tests {
         hashes == gt
     }
 
-
-    fn check_chunked_mphf_parallel<T>(values: Vec<Vec<T>>, total: usize) -> bool 
-    where T: Sync + Hash + PartialEq + Eq + Clone + Debug + Send 
+    fn check_chunked_mphf_parallel<T>(values: Vec<Vec<T>>, total: usize) -> bool
+    where
+        T: Sync + Hash + PartialEq + Eq + Clone + Debug + Send,
     {
         let phf = Mphf::from_chunked_iterator_parallel(1.7, &values, None, total, 2);
 
@@ -865,7 +864,7 @@ mod tests {
                     break;
                 }
             }
-            
+
             check_chunked_mphf(slices.clone(), total) && check_chunked_mphf_parallel(slices, total)
         }
     }
@@ -908,8 +907,8 @@ mod tests {
 
     #[cfg(feature = "heapsize")]
     mod heap_size {
-        use heapsize::HeapSizeOf;
         use super::*;
+        use heapsize::HeapSizeOf;
 
         #[test]
         fn test_heap_size_vec() {
